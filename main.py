@@ -5,15 +5,25 @@ import moviepy.editor as mp
 import shutil
 import os
 
-def extract_text_from_frames(video_path):
-    """Extracts text from frames of a video using Tesseract OCR.
+
+def extract_text_from_frames(video_path, sample_rate=30, debug=True):
+    """Extracts text from video frames using enhanced preprocessing and Tesseract OCR.
 
     Args:
         video_path (str): Path to the video file.
+        sample_rate (int): Process 1 frame per this many frames (reduces processing).
+        debug (bool): If True, saves processed frames for debugging.
 
     Returns:
-        list: List of extracted text from each frame.
+        list: List of extracted text from processed frames, with frame numbers.
     """
+    import cv2
+    import pytesseract
+    import numpy as np
+    import os
+
+    # Configure pytesseract for better text detection
+    custom_config = r'--oem 3 --psm 6 -c tessedit_char_whitelist="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.,!?:;()\- "'
 
     cap = cv2.VideoCapture(video_path)
 
@@ -21,23 +31,77 @@ def extract_text_from_frames(video_path):
         print("Error opening video file")
         return []
 
-    text_list = []
+    # Get video properties
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    print(f"Video loaded: {total_frames} frames, {fps} FPS")
+    print(f"Processing approximately {total_frames // sample_rate} frames")
+
+    results = []
+    frame_count = 0
+
+    # Create debug directory if needed
+    if debug and not os.path.exists("debug_frames"):
+        os.makedirs("debug_frames")
+
     while True:
         ret, frame = cap.read()
 
         if not ret:
             break
 
-        gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        _, thresh_frame = cv2.threshold(gray_frame, 150, 255, cv2.THRESH_BINARY)
-        text = pytesseract.image_to_string(thresh_frame)
-        print("admahajan "+ text)
-        text_list.append(text)
+        frame_count += 1
+
+        # Process only every Nth frame based on sample_rate
+        if frame_count % sample_rate != 0:
+            continue
+
+        # Image preprocessing pipeline
+        # 1. Convert to grayscale
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        # 2. Apply bilateral filter to remove noise while preserving edges
+        filtered = cv2.bilateralFilter(gray, 11, 17, 17)
+
+        # 3. Apply adaptive thresholding instead of global
+        thresh = cv2.adaptiveThreshold(
+            filtered,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV,
+            11, 2
+        )
+
+        # 4. Try both normal and inverted images (text could be white-on-black or black-on-white)
+        text_normal = pytesseract.image_to_string(thresh, config=custom_config).strip()
+        text_inverted = pytesseract.image_to_string(255 - thresh, config=custom_config).strip()
+
+        # Choose the result with more characters as likely better
+        text = text_normal if len(text_normal) > len(text_inverted) else text_inverted
+
+        # Only save non-empty results
+        if text:
+            timestamp = frame_count / fps
+            results.append({
+                "frame": frame_count,
+                "time": f"{int(timestamp // 60):02d}:{int(timestamp % 60):02d}",
+                "text": text
+            })
+            print(f"Frame {frame_count} ({results[-1]['time']}): Text found")
+
+        # Save debug images if requested
+        if debug and text:
+            print("wtf")
+            cv2.imwrite(f"debug_frames/frame_{frame_count}_original.jpg", frame)
+            cv2.imwrite(f"debug_frames/frame_{frame_count}_processed.jpg", thresh)
 
     cap.release()
     cv2.destroyAllWindows()
 
-    return text_list
+    print(f"Processed {frame_count} frames, found text in {len(results)} frames")
+    return results
+
 
 def extract_audio_transcript(video_path):
     """Extracts audio transcript from a video using SpeechRecognition and MoviePy.
@@ -81,6 +145,7 @@ def extract_audio_transcript(video_path):
             pass  # Ignore if the file doesn't exist
 
     return ""
+
 
 if __name__ == "__main__":
     video_path = "/Users/adityamahajan/Downloads/test.mp4"  # Replace with your video path
